@@ -4,6 +4,9 @@ A backend API and web UI for AI-content attribution on creative writing platform
 
 ---
 
+## Video Walkthrough Link
+https://www.flexclip.com/share/16132807XYUm4puUXFx1XNI2bkTFWoE5OtQWamkJ.html
+
 ## Quickstart
 
 ```bash
