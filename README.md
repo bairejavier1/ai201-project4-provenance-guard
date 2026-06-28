@@ -1,6 +1,6 @@
 # Provenance Guard
 
-A backend API for AI-content attribution on creative writing platforms. Accepts text submissions, classifies them as likely AI-generated or likely human-written, surfaces a plain-language transparency label, and provides an appeals workflow for disputed classifications.
+A backend API and web UI for AI-content attribution on creative writing platforms. Accepts text submissions, classifies them as likely AI-generated or likely human-written using two independent detection signals, scores confidence, surfaces a plain-language transparency label, and provides an appeals workflow for disputed classifications.
 
 ---
 
@@ -15,25 +15,64 @@ source .venv/bin/activate       # Mac/Linux
 
 pip install -r requirements.txt
 
-# Create .env with your Groq key
+# Create .env with your Groq key (never commit this file)
 echo "GROQ_API_KEY=your_key_here" > .env
 
 python app.py
+# Visit http://localhost:5000
 ```
+
+---
+
+## Project Structure
+
+```
+ai201-project4-provenance-guard/
+├── app.py               # Flask backend — all detection, scoring, and API logic
+├── templates/
+│   └── index.html       # UI layout and CSS (no inline JavaScript)
+├── static/
+│   └── app.js           # All frontend JavaScript logic
+├── planning.md          # Pre-implementation spec and architecture
+├── README.md            # This file
+├── requirements.txt
+├── .gitignore
+└── audit_log.json       # Created automatically on first submission
+```
+
+---
+
+## Web UI
+
+Visiting `http://localhost:5000` opens a full web interface with three tabs:
+
+| Tab | Purpose |
+|---|---|
+| **Analyze** | Paste any text, pick a sample, and run the full detection pipeline. Shows animated pipeline steps, the three signal score bars, the transparency label, and an appeal form. |
+| **Audit log** | Full table of every classification and appeal — timestamps, both signal scores, combined confidence, attribution, and status. |
+| **Score guide** | Plain-language explanation of what each percentage means, how the two signals work, why they sometimes disagree, when scores are less reliable, and how to appeal a result. |
 
 ---
 
 ## Architecture Overview
 
-A text submission enters `POST /submit` and is routed through two independent detection signals running in sequence. **Signal 1** (LLM via Groq) assesses the text semantically — whether it reads as AI-generated based on phrasing patterns, structural clichés, and stylistic coherence. **Signal 2** (stylometric heuristics) ignores meaning entirely and measures statistical structure: sentence-length variance, vocabulary diversity, punctuation density, and frequency of formulaic transition phrases.
+A text submission enters `POST /submit` and passes through a four-stage pipeline:
 
-Both signal scores are passed to a **confidence scoring function** that weights them (60/40), applies a disagreement penalty when the signals diverge strongly, and maps the result to one of three attribution buckets. That bucket determines which **transparency label** variant is returned. Every step is written to a structured JSON audit log.
+**Stage 1 — Validation:** The request is checked for valid JSON, correct field types, and length limits (50–10,000 characters). Any failure returns a structured error immediately — nothing downstream runs.
 
-**Submission Flow:**
-`POST /submit` → Signal 1 (LLM) + Signal 2 (Stylometrics) → Confidence Scoring → Transparency Label → Audit Log → JSON Response
+**Stage 2 — Detection:** Two completely independent signals run sequentially. Signal 1 (LLM via Groq) assesses the text semantically. Signal 2 (stylometric heuristics) measures statistical structure in pure Python with no API call. Reliability warnings are collected if the text is very short, non-Latin, looks like source code, or exceeds the LLM's analysis window.
 
-**Appeal Flow:**
-`POST /appeal` → Look up content_id → Update status to `under_review` → Log appeal event → Return confirmation
+**Stage 3 — Scoring:** Both signal scores are combined (60/40 weighting) into a single confidence score. A disagreement penalty caps the score at 0.70 when the signals diverge by more than 0.30, preventing false confidence.
+
+**Stage 4 — Output:** A plain-language transparency label is generated, the full record is written to the audit log, and the JSON response is returned.
+
+**Submission flow:**
+`POST /submit` → Rate limiter → Input validation → llm_signal() + stylometric_signal() → compute_confidence() → generate_label() → audit_log.json → JSON response
+
+**Appeal flow:**
+`POST /appeal` → Look up content_id → Update status to `under_review` → Log appeal → Return confirmation
+
+**Persistence:** On startup, `build_content_store()` rebuilds the in-memory content store from `audit_log.json` so appeals work correctly even after a Flask restart.
 
 ---
 
@@ -41,6 +80,8 @@ Both signal scores are passed to a **confidence scoring function** that weights 
 
 | Method | Endpoint | Description |
 |---|---|---|
+| GET | `/` | Web UI (Analyze, Audit log, Score guide tabs) |
+| GET | `/api` | API info and endpoint listing |
 | POST | `/submit` | Submit text for attribution analysis |
 | POST | `/appeal` | Contest a classification |
 | GET | `/log` | View structured audit log |
@@ -59,127 +100,142 @@ Both signal scores are passed to a **confidence scoring function** that weights 
 **Response:**
 ```json
 {
-  "content_id": "3f7a2b1e-...",
+  "content_id": "3f7a2b1e-4c9a-4e1b-8d2f-1a2b3c4d5e6f",
   "attribution": "likely_ai",
-  "confidence": 0.78,
-  "llm_score": 0.82,
-  "stylo_score": 0.71,
+  "confidence": 0.81,
+  "llm_score": 0.88,
+  "llm_reasoning": "Text uses formulaic transitions and hedged vagueness typical of AI output.",
+  "stylo_score": 0.70,
+  "signal_disagreement": 0.18,
   "label": {
     "headline": "⚠️ Likely AI-Generated",
-    "body": "Our system is 78% confident this content was generated by an AI writing tool...",
+    "body": "Our system is 81% confident this content was generated by an AI writing tool, not written by a person. The author can submit an appeal if this is incorrect.",
     "cta": "Dispute this label →",
     "variant": "high_confidence_ai"
   },
+  "warnings": [],
   "status": "classified",
   "timestamp": "2025-04-01T14:32:10.123Z"
 }
 ```
 
+**Validation rules:**
+- `text` must be a string between 50 and 10,000 characters
+- `creator_id` is optional (defaults to "anonymous"), max 100 characters
+- Request must have `Content-Type: application/json`
+
 ---
 
 ## Detection Signals
 
-### Signal 1: LLM-Based Classification (Groq — llama-3.3-70b-versatile)
+### Signal 1 — LLM Semantic Analysis (Groq, llama-3.3-70b-versatile)
 
-**What it measures:** The semantic and stylistic coherence of the text as a whole. The model is prompted to look for AI generation markers: formulaic transitions, hedged vagueness ("various stakeholders", "it is important to note"), structural predictability, absence of personal texture, and overly balanced argumentation.
+**What it measures:** The semantic and stylistic coherence of the text as a whole. The LLM is prompted to identify AI generation markers: formulaic transitions ("Furthermore", "It is important to note"), hedged vagueness ("various stakeholders", "numerous factors"), perfectly balanced argumentation, absence of personal texture, and structural predictability.
 
-**Output:** Float [0.0, 1.0] — 1.0 = model is confident text is AI-generated.
+**Output:** Float [0.0, 1.0] — 1.0 = model is highly confident the text is AI-generated. Also returns a one-sentence `reasoning` string explaining the assessment.
 
-**Why this signal:** Large language models are particularly well-positioned to recognize LLM output because they share the same training patterns. This signal captures holistic semantic quality that no rule-based system can match.
+**Analysis window:** The first 4,000 characters. Texts longer than this are accepted but trigger a reliability warning noting what percentage was analyzed.
 
-**What it misses:** Formal human writing (academic papers, legal prose) can trigger false positives because it shares surface properties with AI output — precision, structured hedging, complete sentences. The model also cannot distinguish a human who writes like an AI from an AI itself.
+**Resilience:** If the model returns malformed JSON, a regex fallback extracts the probability number. If the Groq API is unreachable, the signal returns a neutral 0.5 and the pipeline continues rather than crashing.
+
+**Why this signal:** Large language models recognise LLM output particularly well because they share the same training distributions. This signal captures holistic semantic quality that no rule-based system can replicate.
+
+**What it misses:** Formal human writing (academic papers, legal prose) shares surface properties with AI output — precision, structured hedging, complete sentences. The model cannot distinguish a human who writes like an AI from an AI itself.
 
 ---
 
-### Signal 2: Stylometric Heuristics (Pure Python)
+### Signal 2 — Stylometric Heuristics (Pure Python)
 
-**What it measures:** Four independent structural statistics computed directly from the text:
+**What it measures:** Four independent structural statistics computed directly from the raw text — no API call required:
 
-1. **Sentence-length variance** — AI text has suspiciously uniform sentence lengths (low standard deviation). Human writing is more variable and jagged.
-2. **Type-token ratio (TTR)** — ratio of unique words to total words. AI reuses common vocabulary more than human writers, especially in informal registers.
-3. **Punctuation density** — density of non-period punctuation (commas, semicolons, dashes, parentheses). AI writing tends toward simpler, cleaner punctuation patterns.
-4. **Formulaic transition phrase frequency** — explicit count of phrases common in AI output: "Furthermore", "It is important to note", "in today's world", "it is essential to", etc.
+| Metric | Weight | What AI text does |
+|---|---|---|
+| Sentence-length variance | 35% | Very uniform — low standard deviation |
+| Type-token ratio (TTR) | 25% | Reuses common vocabulary — lower TTR |
+| Punctuation density | 20% | Simpler punctuation — fewer commas, dashes, parentheses |
+| Formulaic transition phrases | 20% | Higher frequency of "Furthermore", "In conclusion", etc. |
 
-**Output:** Weighted float [0.0, 1.0] — 1.0 = high structural AI-likeness.
+**Output:** Weighted float [0.0, 1.0] — 1.0 = high structural AI-likeness. Always analyzes the full text regardless of length.
 
-**Weights:** Sentence uniformity 35%, TTR score 25%, punctuation score 20%, formulaic phrases 20%.
+**Automatic fallback to neutral 0.5 when:**
+- Text is under 10 words
+- Over 60% of characters are non-Latin script
+- Over 30% of lines contain code-like tokens
 
-**Why this signal:** These structural properties emerge from how language models are trained — optimizing for fluency produces measurably different statistical distributions than human writing, which is messier and more context-dependent. This signal is entirely independent from the LLM signal (structural vs. semantic).
+**Why this signal:** These statistical properties emerge from how language models are trained — optimizing for fluency produces measurably different distributions than human writing. This signal is structurally independent from the LLM signal (statistical vs. semantic), making the combination more informative than either alone.
 
-**What it misses:** Short texts (< 50 words) produce unreliable variance estimates. Academic human writing scores high on uniformity and low on colloquial punctuation — the system's most significant false-positive class.
+**What it misses:** Short texts (under 50 words) produce unreliable variance estimates. Academic human writing is the most significant false-positive class — formal structure and transition words are shared properties.
 
 ---
 
 ## Confidence Scoring
 
-### Combination Formula
+### Formula
 
 ```
-combined = 0.60 × llm_score + 0.40 × stylo_score
+combined = (0.60 × llm_score) + (0.40 × stylo_score)
 ```
 
-- **LLM gets 60% weight** because semantic judgment outperforms structural statistics for short texts and stylistically varied input.
-- **Stylometrics gets 40%** because it provides independent structural corroboration that doesn't rely on the LLM's subjective judgment.
+LLM gets 60% weight because semantic judgment outperforms structural statistics on short or stylistically varied text. Stylometrics gets 40% as independent structural corroboration.
 
-### Signal Disagreement Penalty
+### Signal disagreement penalty
 
-If `|llm_score - stylo_score| > 0.30`, the combined score is capped at 0.70. This forces an "uncertain" result when signals disagree strongly — disagreement between independent methods is itself evidence of uncertainty, and we should not be confidently wrong.
+If `|llm_score − stylo_score| > 0.30`, the combined score is capped at 0.70. This prevents the system from being confidently wrong when its own signals disagree — disagreement between independent methods is itself evidence of uncertainty.
 
-### Thresholds (false-positive-aware)
+### Thresholds
 
-| Combined Score | Attribution | Label Variant |
+The "likely_ai" threshold is deliberately set at 0.65, not 0.5, because wrongly labeling a human creator's work as AI-generated is more harmful than missing an AI submission.
+
+| Combined score | Attribution | Label shown |
 |---|---|---|
-| ≥ 0.65 | `likely_ai` | High-confidence AI |
-| 0.36–0.64 | `uncertain` | Uncertain |
-| ≤ 0.35 | `likely_human` | High-confidence human |
+| ≥ 0.65 | `likely_ai` | ⚠️ Likely AI-Generated |
+| 0.36–0.64 | `uncertain` | 🔍 Origin Unclear |
+| ≤ 0.35 | `likely_human` | ✅ Likely Human-Written |
 
-The "likely_ai" threshold is set at **0.65, not 0.5**, because wrongly labeling a human creator's work as AI-generated is more harmful than missing an AI submission.
+### Example submissions showing score variation
 
-### Example Submissions with Different Confidence Scores
-
-**High-confidence AI (score: 0.81)**
+**High-confidence AI (combined: 0.81)**
 ```
-Input: "Artificial intelligence represents a transformative paradigm shift in modern 
-society. It is important to note that while the benefits of AI are numerous, it is 
-equally essential to consider the ethical implications. Furthermore, stakeholders 
-across various sectors must collaborate to ensure responsible deployment."
+Text:        "Artificial intelligence represents a transformative paradigm shift in
+              modern society. It is important to note that while the benefits of AI
+              are numerous, it is equally essential to consider the ethical
+              implications. Furthermore, stakeholders across various sectors must
+              collaborate to ensure responsible deployment."
 
-LLM score:   0.88
-Stylo score: 0.70
-Combined:    0.81
-Attribution: likely_ai
-Label:       ⚠️ Likely AI-Generated
-```
-
-**Lower-confidence / uncertain (score: 0.48)**
-```
-Input: "I've been thinking a lot about remote work lately. There are genuine 
-tradeoffs — flexibility and no commute on one side, isolation and blurred 
-work-life boundaries on the other. Studies show productivity varies widely 
-by individual and role type."
-
-LLM score:   0.55
-Stylo score: 0.36
-Combined:    0.48 (disagreement = 0.19, no penalty)
-Attribution: uncertain
-Label:       🔍 Origin Unclear
+LLM score:           0.88
+Stylometric score:   0.70
+Signal disagreement: 0.18  (no penalty — under 0.30 threshold)
+Combined:            0.81
+Attribution:         likely_ai
+Label:               ⚠️ Likely AI-Generated
 ```
 
-### Validation Approach
+**Uncertain / borderline (combined: 0.48)**
+```
+Text:        "I've been thinking a lot about remote work lately. There are genuine
+              tradeoffs — flexibility and no commute on one side, isolation and
+              blurred work-life boundaries on the other. Studies show productivity
+              varies widely by individual and role type."
 
-Scores were validated by running four deliberately chosen test inputs — clearly AI-generated, clearly human-written, and two borderline cases — and checking that:
-1. The clearly AI input scores > 0.65
-2. The clearly human input scores < 0.35
-3. Borderline inputs land in the uncertain range (0.36–0.64)
-4. The disagreement penalty fires correctly when `llm_score` and `stylo_score` diverge by > 0.30
+LLM score:           0.55
+Stylometric score:   0.36
+Signal disagreement: 0.19  (no penalty)
+Combined:            0.48
+Attribution:         uncertain
+Label:               🔍 Origin Unclear
+```
+
+### Validation approach
+
+Scores were validated against four deliberately chosen inputs — clearly AI-generated, clearly human-written, and two borderline cases — confirming that the AI text scores above 0.65, the human text scores below 0.35, borderlines land in 0.36–0.64, and the disagreement penalty fires correctly when signals diverge by more than 0.30.
 
 ---
 
 ## Transparency Label
 
-Three variants, with their exact display text:
+Three variants with their exact display text:
 
-### Variant 1: High-Confidence AI (`combined ≥ 0.65`)
+### Variant 1 — High-confidence AI (`combined ≥ 0.65`)
 
 > **⚠️ Likely AI-Generated**
 >
@@ -187,17 +243,13 @@ Three variants, with their exact display text:
 >
 > *Dispute this label →*
 
----
-
-### Variant 2: High-Confidence Human (`combined ≤ 0.35`)
+### Variant 2 — High-confidence human (`combined ≤ 0.35`)
 
 > **✅ Likely Human-Written**
 >
-> Our system is {100-pct}% confident this content was written by a person. We found no strong signs of AI generation.
+> Our system is {100−pct}% confident this content was written by a person. We found no strong signs of AI generation.
 
----
-
-### Variant 3: Uncertain (`0.35 < combined < 0.65`)
+### Variant 3 — Uncertain (`0.35 < combined < 0.65`)
 
 > **🔍 Origin Unclear**
 >
@@ -205,63 +257,86 @@ Three variants, with their exact display text:
 >
 > *Add context →*
 
+**Label design decisions:**
+- Plain language throughout — no terms like "classifier output" or "logit score"
+- Confidence expressed as a percentage any reader immediately understands
+- The dispute CTA only appears when there is something to dispute — it never appears on a human verdict
+- Reliability warnings (short text, non-Latin script, long text truncation, source code) are appended to the label body when applicable
+- The uncertain label says "we couldn't determine" rather than "this looks suspicious" to avoid implying wrongdoing
+
 ---
 
-Label design decisions:
-- Plain language throughout — no terms like "classifier output," "logit score," or "threshold"
-- Confidence expressed as a percentage a non-technical reader would immediately understand
-- The CTA is only shown when there's an action to take
-- The uncertain label avoids implying wrongdoing — "we couldn't determine" rather than "this looks suspicious"
+## Input Validation and Edge Cases
+
+The following cases are all handled explicitly rather than failing silently:
+
+| Input condition | Behaviour |
+|---|---|
+| Text under 50 characters | Rejected — 400 with clear error message |
+| Text over 10,000 characters | Rejected — 400 with character and word count |
+| Non-JSON or malformed body | Rejected — 415 or 400 with specific message |
+| `text` field is a number or list | Rejected — 400 "text must be a string" |
+| Null bytes in text | Stripped automatically before analysis |
+| Non-Latin script (>60% characters) | Accepted, stylometric returns neutral 0.5, warning shown |
+| Source code submitted as text | Accepted, stylometric returns neutral 0.5, warning shown |
+| Text under 50 words (but over 50 chars) | Accepted, reliability warning shown to user |
+| Text over 4,000 characters | Accepted, LLM analyzes first 4,000 chars, warning shows percentage covered |
+| LLM returns malformed JSON | Regex fallback extracts score — pipeline continues |
+| Groq API unreachable | LLM signal returns neutral 0.5 — pipeline continues |
+| Corrupted audit_log.json | Caught on startup — log resets to empty rather than crashing |
+| Appeal on non-existent content_id | 404 with explanation |
+| Duplicate appeal on same content_id | 409 — already under review |
+| Appeal reasoning over 2,000 characters | 400 with character limit message |
+| UUID format validation on /status | Validated with regex before store lookup |
 
 ---
 
 ## Rate Limiting
 
-**Limits applied to `POST /submit`:**
+**Limits applied to `POST /submit`:** 10 requests per minute, 100 requests per day.
 
-```
-10 requests per minute
-100 requests per day
-```
+**Reasoning:** A legitimate writer submitting their own work realistically submits 1–5 pieces in a session. The per-minute limit is generous enough for a creator pasting multiple drafts but tight enough to stop automated probing. The per-day limit of 100 accommodates power users and small platform integrations. An adversary attempting to flood the system or reverse-engineer classification thresholds would be blocked after 10 rapid requests.
 
-**Reasoning:**
-
-A legitimate writer submitting their own work would realistically submit 1–5 pieces in a session, not 10 in a minute. The per-minute limit is generous enough for a creator pasting several drafts but restrictive enough to stop a script flooding the system. The per-day limit of 100 accounts for a power user or a small platform integration. An adversary attempting to probe classification boundaries or flood the audit log would be blocked after 10 rapid requests and face a 429 response.
-
-**Rate limit exceeded — observed 429 responses (from 12-request stress test):**
-
-```
-200
-200
-200
-200
-200
-200
-200
-200
-200
-200
-429
-429
-```
-
-The first 10 requests return 200; requests 11 and 12 return 429 with this body:
+**Rate limit exceeded — 429 response body:**
 ```json
 {
   "error": "Rate limit exceeded",
-  "message": "You've submitted too many requests. Limit: 10 per minute / 100 per day. Please try again later.",
-  "retry_after": "60 seconds"
+  "message": "Limit: 10 per minute / 100 per day. Please try again shortly.",
+  "retry_after": 60
 }
+```
+
+**UI behaviour:** When the rate limit is hit, a banner appears showing the exact limits and a live countdown timer. The submit button is automatically disabled until the cooldown expires, then re-enables itself without a page refresh.
+
+**Observed status codes from 12-request stress test:**
+```
+200
+200
+200
+200
+200
+200
+200
+200
+200
+200
+429
+429
 ```
 
 ---
 
 ## Audit Log
 
-Every attribution decision and appeal is written to `audit_log.json` as a structured JSON array. The `GET /log` endpoint returns all entries.
+Every classification and appeal is written to `audit_log.json` immediately. The `GET /log` endpoint returns all entries as structured JSON.
 
-**Sample log with 3+ entries:**
+**On Flask startup**, `build_content_store()` reads the log and rebuilds the in-memory content store so that appeals work correctly across restarts — a content_id from a previous session remains appealable.
 
+**Classification entry fields:** `event`, `content_id`, `creator_id`, `timestamp`, `attribution`, `confidence`, `llm_score`, `stylo_score`, `signal_disagreement`, `warnings`, `status`
+
+**Appeal entry fields:** all of the above plus `original_attribution`, `original_confidence`, `appeal_reasoning`
+
+**Sample log (4 entries including one appeal):**
 ```json
 {
   "count": 4,
@@ -276,6 +351,7 @@ Every attribution decision and appeal is written to `audit_log.json` as a struct
       "llm_score": 0.88,
       "stylo_score": 0.70,
       "signal_disagreement": 0.18,
+      "warnings": [],
       "status": "classified"
     },
     {
@@ -288,6 +364,7 @@ Every attribution decision and appeal is written to `audit_log.json` as a struct
       "llm_score": 0.18,
       "stylo_score": 0.28,
       "signal_disagreement": 0.10,
+      "warnings": [],
       "status": "classified"
     },
     {
@@ -300,6 +377,7 @@ Every attribution decision and appeal is written to `audit_log.json` as a struct
       "llm_score": 0.55,
       "stylo_score": 0.36,
       "signal_disagreement": 0.19,
+      "warnings": ["Short texts produce less reliable scores."],
       "status": "classified"
     },
     {
@@ -316,43 +394,45 @@ Every attribution decision and appeal is written to `audit_log.json` as a struct
 }
 ```
 
-Log format is structured JSON. Every classification entry includes: `event`, `content_id`, `creator_id`, `timestamp`, `attribution`, `confidence`, `llm_score`, `stylo_score`, `signal_disagreement`, and `status`. Appeal entries add `original_attribution`, `original_confidence`, and `appeal_reasoning`.
-
 ---
 
 ## Known Limitations
 
-**Non-native English speakers writing formally:** This is the most ethically serious false-positive case. A creator who has learned English through formal instruction may write in complete sentences, avoid contractions, use transition phrases like "Furthermore" or "In conclusion," and exhibit uniform sentence structure — all of which are AI markers in both signals. The LLM signal will recognize formal hedging as an AI pattern; the stylometric signal will flag the uniformity and transition phrases. Both signals may classify this as AI-generated despite it being authentic human writing. This limitation is structural to the signals chosen — the only mitigation available is the appeals workflow, which is why it's prominently surfaced in the uncertain and AI label variants.
+**Non-native English speakers writing formally:** A creator who learned English through formal instruction may write in complete sentences, avoid contractions, use transition phrases like "Furthermore", and show uniform sentence structure — all of which are AI markers in both signals. This is the most ethically serious false-positive case and is structural to the signals chosen. The only mitigation is the appeals workflow, which is why it is prominently surfaced in both the AI and uncertain label variants.
 
-**Short texts (< 50 words):** The stylometric signal requires sufficient text to compute meaningful variance. Poems, microfiction, and short blog entries produce unreliable sentence-length variance estimates — the system may return artificially centered (0.5) stylometric scores that push all short content toward "uncertain" regardless of its true origin.
+**Short texts under 50 words:** Even when the character minimum is met, the stylometric signal needs multiple sentences to compute meaningful variance. Poems, haikus, and microfiction with fewer than 50 words will produce unreliable stylometric scores. The system detects this and shows a reliability warning, but cannot fully compensate.
+
+**Long texts over 4,000 characters:** The LLM signal analyzes only the first 4,000 characters. If a long piece begins with a formal introduction but becomes more casual midway through, the LLM may miss that shift. The stylometric signal always analyzes the full text, providing partial compensation.
+
+**Source code and non-Latin scripts:** The stylometric signal returns a neutral 0.5 for these inputs, leaving only the LLM signal active. The combined score is less reliable as a result. Both cases trigger reliability warnings.
 
 ---
 
 ## Spec Reflection
 
-**One way the spec helped:** Defining the three label variants in `planning.md` before writing any code forced a concrete decision about what "uncertain" means to a user — which in turn locked in the 0.35/0.65 thresholds. Without the pre-written label text requiring plain language, the confidence scoring thresholds might have been arbitrary numbers rather than values chosen to produce a meaningful user experience.
+**One way the spec helped:** Writing out the three label variants in `planning.md` before any code forced a concrete decision about what "uncertain" means to a non-technical user. That decision locked in the 0.35/0.65 thresholds — they were chosen to produce a specific user experience, not as arbitrary cutoffs.
 
-**One way implementation diverged:** The spec described the stylometric signal as computing "2–3 metrics." During implementation, a fourth metric (formulaic transition phrase detection) was added because testing on borderline cases revealed that sentence uniformity and TTR alone missed a distinct class of AI text: conversational-sounding but structurally formulaic outputs. The spec was updated retroactively but the implementation expanded beyond the original plan. This was the right call — the spec was a starting point, not a constraint.
+**One way implementation diverged:** The spec described the stylometric signal as computing "2–3 metrics." During implementation a fourth metric was added — formulaic transition phrase detection — because testing on borderline inputs showed that sentence uniformity and TTR alone missed a distinct class of AI text that sounds conversational but uses structured transitions. The spec was the starting point, not the ceiling.
 
 ---
 
 ## AI Usage
 
-### Instance 1: Flask App Skeleton + LLM Signal Function
-**What I directed:** I provided the detection signals section from `planning.md` and the architecture diagram and asked for a Flask app skeleton with a `POST /submit` route stub and an `llm_signal()` function that returns a float.
+### Instance 1 — Flask app skeleton and LLM signal function
 
-**What it produced:** A working function and route structure, but the generated prompt sent to Groq returned free-text rather than structured JSON, causing JSON parse failures on some inputs.
+**What I directed:** I provided the detection signals section from `planning.md` and the architecture diagram and asked for a Flask app skeleton with a `POST /submit` route stub and an `llm_signal()` function returning a float.
 
-**What I revised:** I rewrote the prompt to specify `Respond with ONLY a JSON object` and added a regex step to strip markdown code fences (` ```json ``` `) before parsing, which fixed the intermittent failures. I also added the `max(0.0, min(1.0, score))` clamp, which the AI omitted.
+**What it produced:** A working function and route structure, but the Groq prompt returned free-text rather than structured JSON, causing parse failures on some inputs.
 
----
+**What I revised:** Rewrote the prompt to specify `Respond with ONLY a JSON object` and added a regex step to strip markdown code fences before parsing. Added a regex fallback to extract the score even from non-JSON responses. Added the `max(0.0, min(1.0, score))` clamp which the generated code omitted.
 
-### Instance 2: Confidence Scoring + Disagreement Penalty
-**What I directed:** I provided the uncertainty representation section and asked for a `compute_confidence()` function implementing the 60/40 weighting and a disagreement penalty.
+### Instance 2 — Confidence scoring and disagreement penalty
 
-**What it produced:** A function that computed the weighted average correctly but applied the penalty by subtracting a fixed 0.15 from the combined score (not capping at 0.70).
+**What I directed:** I provided the uncertainty representation section and asked for a `compute_confidence()` function with the 60/40 weighting and a disagreement penalty.
 
-**What I revised:** Changed the penalty logic to `min(combined, 0.70)` — a cap rather than a subtraction — because a subtraction could push a score below the `likely_ai` threshold even on genuinely high-confidence AI text where both signals agreed. The cap preserves the high-confidence reading when signals agree and only gates uncertain cases. I also added the `signal_disagreement` field to the return dict so both the response and audit log could surface it.
+**What it produced:** The weighted average was correct but the penalty subtracted a fixed 0.15 from the score rather than capping it.
+
+**What I revised:** Changed the penalty to `min(combined, 0.70)` — a cap rather than a subtraction — because a subtraction could incorrectly push a high-confidence score below the `likely_ai` threshold even when both signals strongly agreed. Also added the `signal_disagreement` field to the return dict so it appears in both the API response and the audit log.
 
 ---
 
@@ -365,43 +445,40 @@ groq==0.15.0
 python-dotenv==1.0.1
 ```
 
-SQLite is not used in this implementation — the audit log is a JSON file (`audit_log.json`) for simplicity and portability.
+The audit log uses a plain JSON file (`audit_log.json`). SQLite is not required.
 
 ---
 
-## Test Commands
+## Test Commands (PowerShell)
 
-**Submit likely-AI text:**
-```bash
-curl -s -X POST http://localhost:5000/submit \
-  -H "Content-Type: application/json" \
-  -d '{"text": "Artificial intelligence represents a transformative paradigm shift in modern society. It is important to note that while the benefits of AI are numerous, it is equally essential to consider the ethical implications. Furthermore, stakeholders across various sectors must collaborate to ensure responsible deployment.", "creator_id": "test-user-1"}' | python -m json.tool
+**Submit AI-like text:**
+```powershell
+Invoke-RestMethod -Method POST -Uri "http://localhost:5000/submit" -ContentType "application/json" -Body '{"text": "Artificial intelligence represents a transformative paradigm shift in modern society. It is important to note that while the benefits of AI are numerous, it is equally essential to consider the ethical implications. Furthermore, stakeholders across various sectors must collaborate to ensure responsible deployment.", "creator_id": "test-user-1"}'
 ```
 
-**Submit likely-human text:**
-```bash
-curl -s -X POST http://localhost:5000/submit \
-  -H "Content-Type: application/json" \
-  -d '{"text": "ok so i finally tried that new ramen place downtown and honestly? underwhelming. the broth was fine but they put WAY too much sodium in it and i was thirsty for like three hours after. my friend got the spicy version and said it was better. probably wont go back unless someone drags me there", "creator_id": "test-user-2"}' | python -m json.tool
+**Submit human-like text:**
+```powershell
+Invoke-RestMethod -Method POST -Uri "http://localhost:5000/submit" -ContentType "application/json" -Body '{"text": "ok so i finally tried that new ramen place downtown and honestly? underwhelming. the broth was fine but they put WAY too much sodium in it and i was thirsty for like three hours after. my friend got the spicy version and said it was better. probably wont go back unless someone drags me there", "creator_id": "test-user-2"}'
 ```
 
 **Submit an appeal (replace CONTENT_ID):**
-```bash
-curl -s -X POST http://localhost:5000/appeal \
-  -H "Content-Type: application/json" \
-  -d '{"content_id": "PASTE-CONTENT-ID-HERE", "creator_reasoning": "I wrote this myself from personal experience. I am a non-native English speaker and my writing style may appear more formal than typical."}' | python -m json.tool
+```powershell
+Invoke-RestMethod -Method POST -Uri "http://localhost:5000/appeal" -ContentType "application/json" -Body '{"content_id": "PASTE-CONTENT-ID-HERE", "creator_reasoning": "I wrote this myself from personal experience. I am a non-native English speaker and my writing style may appear more formal than typical."}'
 ```
 
 **View audit log:**
-```bash
-curl -s http://localhost:5000/log | python -m json.tool
+```powershell
+Invoke-RestMethod -Uri "http://localhost:5000/log"
 ```
 
-**Rate limit stress test (should see 429 after 10 requests):**
-```bash
-for i in $(seq 1 12); do
-  curl -s -o /dev/null -w "%{http_code}\n" -X POST http://localhost:5000/submit \
-    -H "Content-Type: application/json" \
-    -d '{"text": "This is a test submission for rate limit testing purposes only.", "creator_id": "ratelimit-test"}'
-done
+**Rate limit stress test (expect 200×10 then 429×2):**
+```powershell
+1..12 | ForEach-Object {
+    try {
+        $r = Invoke-WebRequest -Method POST -Uri "http://localhost:5000/submit" -ContentType "application/json" -Body '{"text": "This is a test submission for rate limit testing purposes only.", "creator_id": "ratelimit-test"}'
+        $r.StatusCode
+    } catch {
+        $_.Exception.Response.StatusCode.value__
+    }
+}
 ```

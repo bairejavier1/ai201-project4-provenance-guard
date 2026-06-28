@@ -1,0 +1,1040 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Provenance Guard</title>
+  <style>
+    /* ── Reset & base ───────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:           #0f0f11;
+      --surface:      #18181c;
+      --surface-2:    #22222a;
+      --surface-3:    #2a2a34;
+      --border:       rgba(255,255,255,0.08);
+      --border-mid:   rgba(255,255,255,0.14);
+      --text:         #f0eff4;
+      --text-muted:   #8b8a96;
+      --text-dim:     #5a5966;
+      --accent:       #7c6fef;
+      --accent-light: #a99cf5;
+      --accent-bg:    rgba(124,111,239,0.12);
+      --green:        #34d17a;
+      --green-bg:     rgba(52,209,122,0.1);
+      --amber:        #f5a623;
+      --amber-bg:     rgba(245,166,35,0.1);
+      --red:          #ef6c6c;
+      --red-bg:       rgba(239,108,108,0.1);
+      --radius:       10px;
+      --mono:         'SF Mono', 'Fira Code', monospace;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      font-size: 15px;
+      line-height: 1.6;
+      min-height: 100vh;
+    }
+
+    /* ── Layout shell: header + 3 columns ──────────────────── */
+    .shell {
+      display: grid;
+      grid-template-columns: 250px 1fr 300px;
+      grid-template-rows: 56px 1fr;
+      min-height: 100vh;
+    }
+
+    /* ── Header ─────────────────────────────────────────────── */
+    header {
+      grid-column: 1 / -1;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      padding: 0 24px;
+      gap: 14px;
+    }
+
+    .logo {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      font-weight: 600;
+      font-size: 15px;
+    }
+
+    .logo-icon {
+      width: 28px;
+      height: 28px;
+      background: var(--accent);
+      border-radius: 7px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 14px;
+    }
+
+    .header-sub {
+      font-size: 12px;
+      color: var(--text-dim);
+    }
+
+    .tab-group {
+      display: flex;
+      gap: 2px;
+      margin-left: auto;
+    }
+
+    .tab-btn {
+      background: none;
+      border: none;
+      color: var(--text-muted);
+      font-size: 13px;
+      padding: 6px 14px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-family: inherit;
+      transition: background 0.15s, color 0.15s;
+    }
+    .tab-btn:hover  { background: var(--surface-2); color: var(--text); }
+    .tab-btn.active { background: var(--surface-3); color: var(--text); }
+
+    /* ── Sidebar ─────────────────────────────────────────────── */
+    .sidebar {
+      background: var(--surface);
+      border-right: 1px solid var(--border);
+      padding: 20px 14px;
+      overflow-y: auto;
+    }
+
+    .sidebar-label {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--text-dim);
+      margin-bottom: 10px;
+      padding: 0 4px;
+    }
+
+    .sample-btn {
+      width: 100%;
+      background: none;
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+      font-size: 12px;
+      padding: 10px 11px;
+      border-radius: var(--radius);
+      cursor: pointer;
+      text-align: left;
+      line-height: 1.5;
+      font-family: inherit;
+      margin-bottom: 6px;
+      transition: background 0.15s, border-color 0.15s, color 0.15s;
+    }
+    .sample-btn:hover {
+      background: var(--surface-2);
+      border-color: var(--border-mid);
+      color: var(--text);
+    }
+
+    .tag {
+      display: inline-block;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      padding: 2px 7px;
+      border-radius: 4px;
+      margin-bottom: 4px;
+    }
+    .tag-ai     { background: var(--red-bg);   color: var(--red);   }
+    .tag-human  { background: var(--green-bg); color: var(--green); }
+    .tag-border { background: var(--amber-bg); color: var(--amber); }
+
+    .divider { height: 1px; background: var(--border); margin: 14px 0; }
+
+    /* ── Main content area ──────────────────────────────────── */
+    main {
+      padding: 26px 30px;
+      overflow-y: auto;
+    }
+
+    .page         { display: none; }
+    .page.active  { display: block; }
+
+    .section-label {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--text-dim);
+      margin-bottom: 12px;
+    }
+
+    /* ── Form controls ──────────────────────────────────────── */
+    textarea, input[type="text"] {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      color: var(--text);
+      font-family: inherit;
+      font-size: 14px;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+    textarea:focus, input[type="text"]:focus { border-color: var(--accent); }
+    textarea::placeholder, input::placeholder { color: var(--text-dim); }
+
+    textarea {
+      width: 100%;
+      padding: 14px 16px;
+      resize: vertical;
+      min-height: 150px;
+      line-height: 1.7;
+    }
+
+    input[type="text"] { padding: 9px 13px; }
+
+    .input-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-top: 12px;
+      flex-wrap: wrap;
+    }
+
+    .btn-primary {
+      background: var(--accent);
+      border: none;
+      color: #fff;
+      font-family: inherit;
+      font-size: 13px;
+      font-weight: 600;
+      padding: 9px 20px;
+      border-radius: var(--radius);
+      cursor: pointer;
+      white-space: nowrap;
+      transition: background 0.15s;
+    }
+    .btn-primary:hover    { background: #6b60d4; }
+    .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    .btn-ghost {
+      background: none;
+      border: 1px solid var(--border-mid);
+      color: var(--text-muted);
+      font-family: inherit;
+      font-size: 13px;
+      padding: 9px 16px;
+      border-radius: var(--radius);
+      cursor: pointer;
+      transition: border-color 0.15s, color 0.15s;
+    }
+    .btn-ghost:hover    { border-color: var(--accent); color: var(--accent); }
+    .btn-ghost:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    /* ── Cards ──────────────────────────────────────────────── */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 20px 22px;
+      margin-top: 18px;
+    }
+
+    /* ── Processing steps ───────────────────────────────────── */
+    .step {
+      display: flex;
+      align-items: flex-start;
+      gap: 12px;
+      padding: 11px 0;
+      border-bottom: 1px solid var(--border);
+      opacity: 0.3;
+      transition: opacity 0.3s;
+    }
+    .step:last-child          { border-bottom: none; }
+    .step.active, .step.done  { opacity: 1; }
+
+    .step-dot {
+      width: 20px;
+      height: 20px;
+      flex-shrink: 0;
+      border-radius: 50%;
+      background: var(--surface-3);
+      border: 1.5px solid var(--border-mid);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 10px;
+      margin-top: 1px;
+      transition: background 0.3s, border-color 0.3s;
+    }
+    .step.done .step-dot   { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .step.active .step-dot { border-color: var(--accent); animation: pulse 1s infinite; }
+
+    @keyframes pulse {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(124,111,239,0.4); }
+      50%       { box-shadow: 0 0 0 5px rgba(124,111,239,0); }
+    }
+
+    .step-title  { font-size: 13px; color: var(--text-muted); }
+    .step.done .step-title { color: var(--text); }
+
+    .step-detail {
+      font-size: 11px;
+      color: var(--text-dim);
+      font-family: var(--mono);
+      margin-top: 2px;
+    }
+
+    /* ── Result card ────────────────────────────────────────── */
+    .result-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 18px;
+    }
+
+    .result-headline {
+      font-size: 18px;
+      font-weight: 700;
+      margin-bottom: 5px;
+    }
+
+    .result-body {
+      font-size: 14px;
+      line-height: 1.65;
+      color: var(--text-muted);
+    }
+
+    .verdict-badge {
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.03em;
+      padding: 5px 13px;
+      border-radius: 20px;
+      white-space: nowrap;
+    }
+    .badge-ai      { background: var(--red-bg);   color: var(--red);   border: 1px solid rgba(239,108,108,0.25); }
+    .badge-human   { background: var(--green-bg); color: var(--green); border: 1px solid rgba(52,209,122,0.25);  }
+    .badge-unclear { background: var(--amber-bg); color: var(--amber); border: 1px solid rgba(245,166,35,0.25);  }
+
+    /* ── Signal score cards ─────────────────────────────────── */
+    .signals-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 10px;
+      margin-bottom: 18px;
+    }
+
+    .signal-card {
+      background: var(--surface-2);
+      border-radius: var(--radius);
+      padding: 13px 15px;
+    }
+
+    .signal-name {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.07em;
+      text-transform: uppercase;
+      color: var(--text-dim);
+      margin-bottom: 7px;
+    }
+
+    .signal-value {
+      font-size: 24px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      margin-bottom: 7px;
+    }
+
+    .bar-track {
+      height: 3px;
+      background: var(--surface-3);
+      border-radius: 2px;
+      overflow: hidden;
+    }
+
+    .bar-fill {
+      height: 100%;
+      border-radius: 2px;
+      background: var(--accent);
+      width: 0%;
+      transition: width 0.7s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    .signal-sub {
+      font-size: 11px;
+      color: var(--text-dim);
+      margin-top: 5px;
+    }
+
+    /* ── Content ID display ─────────────────────────────────── */
+    .content-id {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--accent-light);
+      background: var(--accent-bg);
+      padding: 8px 12px;
+      border-radius: 6px;
+      margin-bottom: 14px;
+      word-break: break-all;
+    }
+
+    /* ── Appeal box ─────────────────────────────────────────── */
+    .appeal-box {
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 15px 17px;
+      margin-top: 14px;
+    }
+
+    .appeal-box h4 {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      margin-bottom: 9px;
+    }
+
+    /* ── Feedback messages ──────────────────────────────────── */
+    .msg-warning {
+      background: var(--amber-bg);
+      border: 1px solid rgba(245,166,35,0.2);
+      color: var(--amber);
+      border-radius: var(--radius);
+      padding: 10px 14px;
+      font-size: 13px;
+      margin-top: 12px;
+    }
+
+    /* Rate limit banner reuses msg-error style but with extra line-height */
+    .msg-error strong { font-weight: 700; }
+
+    .msg-error {
+      background: var(--red-bg);
+      border: 1px solid rgba(239,108,108,0.2);
+      color: var(--red);
+      border-radius: var(--radius);
+      padding: 10px 14px;
+      font-size: 13px;
+      margin-top: 12px;
+    }
+
+    .msg-success {
+      background: var(--green-bg);
+      border: 1px solid rgba(52,209,122,0.2);
+      color: var(--green);
+      border-radius: var(--radius);
+      padding: 10px 14px;
+      font-size: 13px;
+      margin-top: 12px;
+    }
+
+    /* ── Right panel ────────────────────────────────────────── */
+    .panel {
+      background: var(--surface);
+      border-left: 1px solid var(--border);
+      padding: 18px 14px;
+      overflow-y: auto;
+    }
+
+    .panel-title {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--text-dim);
+      margin-bottom: 12px;
+    }
+
+    .activity-entry {
+      background: var(--surface-2);
+      border-radius: var(--radius);
+      padding: 11px 12px;
+      margin-bottom: 7px;
+    }
+
+    .activity-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 5px;
+    }
+
+    .activity-score {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+
+    .activity-id {
+      font-family: var(--mono);
+      font-size: 10px;
+      color: var(--text-dim);
+      margin-top: 3px;
+    }
+
+    .activity-time {
+      font-size: 10px;
+      color: var(--text-dim);
+      margin-top: 3px;
+    }
+
+    .appeal-pill {
+      display: inline-block;
+      background: var(--amber-bg);
+      color: var(--amber);
+      font-size: 10px;
+      font-weight: 700;
+      padding: 2px 7px;
+      border-radius: 4px;
+      margin-top: 4px;
+    }
+
+    /* ── Audit log table ────────────────────────────────────── */
+    .log-table-wrap { overflow-x: auto; }
+
+    .log-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+    }
+
+    .log-table th {
+      text-align: left;
+      padding: 9px 11px;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      color: var(--text-dim);
+      border-bottom: 1px solid var(--border);
+      white-space: nowrap;
+    }
+
+    .log-table td {
+      padding: 9px 11px;
+      border-bottom: 1px solid var(--border);
+      color: var(--text-muted);
+      vertical-align: middle;
+    }
+
+    .log-table tr:hover td { background: var(--surface-2); }
+
+    .chip {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      padding: 3px 8px;
+      border-radius: 4px;
+    }
+    .chip-classified { background: var(--accent-bg); color: var(--accent-light); }
+    .chip-review     { background: var(--amber-bg);  color: var(--amber); }
+    .chip-appeal     { background: rgba(255,255,255,0.05); color: var(--text-dim); }
+
+    /* ── Utility ─────────────────────────────────────────────── */
+    /* ── Score guide page ───────────────────────────────────── */
+    .guide-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 22px 24px;
+      margin-bottom: 16px;
+    }
+
+    .guide-heading {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text);
+      margin-bottom: 12px;
+    }
+
+    .guide-body {
+      font-size: 13px;
+      line-height: 1.7;
+      color: var(--text-muted);
+    }
+
+    .guide-range-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 14px;
+      padding: 12px 0;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .guide-range-bar {
+      width: 4px;
+      height: 48px;
+      border-radius: 2px;
+      flex-shrink: 0;
+      margin-top: 2px;
+    }
+
+    .guide-range-label {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text);
+      margin-bottom: 4px;
+    }
+
+    .guide-range-desc {
+      font-size: 12px;
+      color: var(--text-muted);
+      line-height: 1.6;
+    }
+
+    .guide-signal-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 14px;
+    }
+
+    .guide-signal-badge {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      padding: 4px 10px;
+      border-radius: 6px;
+      white-space: nowrap;
+      margin-top: 2px;
+      flex-shrink: 0;
+    }
+
+    .guide-signal-title {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text);
+      margin-bottom: 5px;
+    }
+
+    .guide-signal-desc {
+      font-size: 12px;
+      color: var(--text-muted);
+      line-height: 1.65;
+    }
+
+    .guide-warning-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 12px;
+      padding: 10px 0;
+      border-bottom: 1px solid var(--border);
+      font-size: 13px;
+      color: var(--text-muted);
+      line-height: 1.6;
+    }
+
+    .guide-warning-row:last-child { border-bottom: none; }
+
+    .guide-warning-icon {
+      color: var(--amber);
+      font-size: 14px;
+      flex-shrink: 0;
+      margin-top: 1px;
+    }
+
+    /* ── Utility ─────────────────────────────────────────────── */
+    .hidden  { display: none !important; }
+    .mono    { font-family: var(--mono); font-size: 11px; }
+
+    .refresh-btn {
+      background: none;
+      border: 1px solid var(--border);
+      color: var(--text-dim);
+      font-size: 11px;
+      padding: 4px 10px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-family: inherit;
+      transition: border-color 0.15s, color 0.15s;
+    }
+    .refresh-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+    .spinner {
+      width: 16px;
+      height: 16px;
+      border: 2px solid var(--border-mid);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      display: inline-block;
+      vertical-align: middle;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+<div class="shell">
+
+  <!-- ── Header ─────────────────────────────────────────────── -->
+  <header>
+    <div class="logo">
+      <div class="logo-icon">🛡</div>
+      Provenance Guard
+    </div>
+    <span class="header-sub">AI content attribution</span>
+    <div class="tab-group">
+      <button class="tab-btn active" onclick="showPage('analyze', this)">Analyze</button>
+      <button class="tab-btn"        onclick="showPage('log', this)">Audit log</button>
+      <button class="tab-btn"        onclick="showPage('guide', this)">Score guide</button>
+    </div>
+  </header>
+
+  <!-- ── Sidebar: sample texts ─────────────────────────────── -->
+  <aside class="sidebar">
+    <div class="sidebar-label">Sample texts</div>
+
+    <button class="sample-btn" onclick="loadSample('ai')">
+      <div class="tag tag-ai">AI-generated</div><br>
+      "Artificial intelligence represents a transformative paradigm shift..."
+    </button>
+
+    <button class="sample-btn" onclick="loadSample('human')">
+      <div class="tag tag-human">Human-written</div><br>
+      "ok so i finally tried that new ramen place downtown and honestly?..."
+    </button>
+
+    <button class="sample-btn" onclick="loadSample('border1')">
+      <div class="tag tag-border">Borderline</div><br>
+      "The relationship between monetary policy and asset price inflation..."
+    </button>
+
+    <button class="sample-btn" onclick="loadSample('border2')">
+      <div class="tag tag-border">Borderline</div><br>
+      "I've been thinking a lot about remote work lately..."
+    </button>
+
+    <div class="divider"></div>
+    <div class="sidebar-label">Last result</div>
+    <div id="sidebar-last" style="font-size:12px; color:var(--text-dim); padding:0 4px;">
+      No submissions yet.
+    </div>
+  </aside>
+
+  <!-- ── Main content ──────────────────────────────────────── -->
+  <main>
+
+    <!-- Analyze page -->
+    <div id="page-analyze" class="page active">
+      <div class="section-label">Submit content for analysis</div>
+
+      <textarea id="text-input"
+        placeholder="Paste a poem, story excerpt, blog post, or any written content here...">
+      </textarea>
+
+      <div class="input-row">
+        <input type="text" id="creator-input" placeholder="Creator ID"
+               value="demo-user" style="width: 160px;" />
+        <button class="btn-primary" id="submit-btn" onclick="submitContent()">
+          Analyze content
+        </button>
+        <button class="btn-ghost" onclick="clearAll()">Clear</button>
+        <div id="submit-spinner" class="spinner hidden"></div>
+      </div>
+
+      <!-- Error message -->
+      <div id="error-box" class="msg-error hidden"></div>
+
+      <!-- Processing steps (shown while waiting for API) -->
+      <div id="processing-steps" class="card hidden">
+        <div class="section-label" style="margin-bottom: 14px;">Running analysis pipeline</div>
+
+        <div class="step" id="step-1">
+          <div class="step-dot">1</div>
+          <div>
+            <div class="step-title">Signal 1 — LLM semantic analysis</div>
+            <div class="step-detail" id="d1">Sending to Groq llama-3.3-70b-versatile...</div>
+          </div>
+        </div>
+
+        <div class="step" id="step-2">
+          <div class="step-dot">2</div>
+          <div>
+            <div class="step-title">Signal 2 — Stylometric heuristics</div>
+            <div class="step-detail" id="d2">Measuring sentence variance, TTR, punctuation density...</div>
+          </div>
+        </div>
+
+        <div class="step" id="step-3">
+          <div class="step-dot">3</div>
+          <div>
+            <div class="step-title">Confidence scoring</div>
+            <div class="step-detail" id="d3">Combining signals (60% LLM / 40% stylometric)...</div>
+          </div>
+        </div>
+
+        <div class="step" id="step-4">
+          <div class="step-dot">4</div>
+          <div>
+            <div class="step-title">Transparency label generation</div>
+            <div class="step-detail" id="d4">Mapping score to label variant...</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Result card (shown after analysis) -->
+      <div id="result-card" class="card hidden">
+
+        <div class="result-header">
+          <div>
+            <div id="result-headline" class="result-headline"></div>
+            <div id="result-body"     class="result-body"></div>
+          </div>
+          <div id="result-badge" class="verdict-badge"></div>
+        </div>
+
+        <!-- Three signal score bars -->
+        <div class="signals-grid">
+          <div class="signal-card">
+            <div class="signal-name">LLM signal</div>
+            <div class="signal-value" id="sig-llm">—</div>
+            <div class="bar-track"><div class="bar-fill" id="bar-llm"></div></div>
+            <div class="signal-sub">Semantic analysis</div>
+          </div>
+          <div class="signal-card">
+            <div class="signal-name">Stylometric signal</div>
+            <div class="signal-value" id="sig-stylo">—</div>
+            <div class="bar-track"><div class="bar-fill" id="bar-stylo"></div></div>
+            <div class="signal-sub">Structural patterns</div>
+          </div>
+          <div class="signal-card">
+            <div class="signal-name">Combined score</div>
+            <div class="signal-value" id="sig-combined">—</div>
+            <div class="bar-track"><div class="bar-fill" id="bar-combined"></div></div>
+            <div class="signal-sub">60% LLM / 40% stylo</div>
+          </div>
+        </div>
+
+        <!-- Content ID for appeals -->
+        <div class="content-id" id="cid-box"></div>
+
+        <!-- Reliability warning (shown when backend flags edge cases) -->
+        <div id="warning-box" class="msg-warning hidden"></div>
+
+        <!-- Appeal section (hidden when verdict is human) -->
+        <div id="appeal-section" class="appeal-box">
+          <h4>Dispute this classification</h4>
+          <textarea id="appeal-text"
+            placeholder="Explain why you believe this classification is incorrect..."
+            style="min-height: 75px; font-size: 13px;">
+          </textarea>
+          <div class="input-row" style="margin-top: 10px;">
+            <button class="btn-ghost" id="appeal-btn" onclick="submitAppeal()">
+              Submit appeal
+            </button>
+            <div id="appeal-spinner" class="spinner hidden"></div>
+          </div>
+          <div id="appeal-msg" class="hidden"></div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- Audit log page -->
+    <div id="page-log" class="page">
+      <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px;">
+        <div class="section-label" style="margin-bottom: 0;">Audit log</div>
+        <button class="refresh-btn" onclick="loadLog()">Refresh</button>
+      </div>
+
+      <div class="log-table-wrap">
+        <table class="log-table">
+          <thead>
+            <tr>
+              <th>Event</th>
+              <th>Content ID</th>
+              <th>Creator</th>
+              <th>Attribution</th>
+              <th>Confidence</th>
+              <th>LLM</th>
+              <th>Stylo</th>
+              <th>Status</th>
+              <th>Timestamp</th>
+            </tr>
+          </thead>
+          <tbody id="log-tbody">
+            <tr>
+              <td colspan="9" style="color: var(--text-dim); text-align: center; padding: 24px;">
+                Loading...
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Score guide page -->
+    <div id="page-guide" class="page">
+      <div class="section-label" style="margin-bottom: 20px;">Understanding your score</div>
+
+      <!-- What the percentage means -->
+      <div class="guide-card">
+        <h3 class="guide-heading">What does the percentage mean?</h3>
+        <p class="guide-body">
+          Every submission produces a combined score from 0% to 100%. This number
+          reflects how strongly the two detection signals believe the content was
+          generated by an AI writing tool. A higher percentage means more AI-like
+          patterns were found. A lower percentage means the writing looks more
+          like a human wrote it.
+        </p>
+        <p class="guide-body" style="margin-top: 10px;">
+          The score is <strong>not a verdict</strong> — it is a confidence estimate.
+          The system is designed to be cautious: it requires a score of 65% or higher
+          before labeling content as AI-generated, because falsely accusing a human
+          creator is considered worse than missing an AI submission.
+        </p>
+      </div>
+
+      <!-- Score range table -->
+      <div class="guide-card">
+        <h3 class="guide-heading">Score ranges at a glance</h3>
+        <div class="guide-range-row">
+          <div class="guide-range-bar" style="background: var(--red);"></div>
+          <div>
+            <div class="guide-range-label">65% – 100% — <span style="color:var(--red);">⚠️ Likely AI-Generated</span></div>
+            <div class="guide-range-desc">Both signals agree the writing shows strong AI patterns — uniform sentence lengths, formulaic phrasing, hedged vagueness, and low vocabulary variation.</div>
+          </div>
+        </div>
+        <div class="guide-range-row">
+          <div class="guide-range-bar" style="background: var(--amber);"></div>
+          <div>
+            <div class="guide-range-label">36% – 64% — <span style="color:var(--amber);">🔍 Origin Unclear</span></div>
+            <div class="guide-range-desc">The signals are mixed or weak. The system cannot confidently classify the content either way. This is intentional — an honest uncertain result is better than a confident wrong one.</div>
+          </div>
+        </div>
+        <div class="guide-range-row" style="border-bottom: none;">
+          <div class="guide-range-bar" style="background: var(--green);"></div>
+          <div>
+            <div class="guide-range-label">0% – 35% — <span style="color:var(--green);">✅ Likely Human-Written</span></div>
+            <div class="guide-range-desc">The writing shows strong human patterns — variable sentence lengths, rich vocabulary, natural punctuation, and an absence of formulaic AI transitions.</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- The two signals -->
+      <div class="guide-card">
+        <h3 class="guide-heading">The two signals explained</h3>
+
+        <div class="guide-signal-row">
+          <div class="guide-signal-badge" style="background:var(--red-bg);color:var(--red);">Signal 1</div>
+          <div>
+            <div class="guide-signal-title">LLM Semantic Analysis</div>
+            <div class="guide-signal-desc">
+              Sends your text to a large language model (Groq llama-3.3-70b) and asks it
+              to assess whether the writing reads as AI-generated. It looks at meaning,
+              style, and phrasing — things like overuse of hedging words ("various",
+              "numerous"), perfectly balanced arguments, and absence of personal detail.
+              This signal understands <em>what</em> is being said.
+            </div>
+          </div>
+        </div>
+
+        <div class="guide-signal-row" style="margin-top: 14px;">
+          <div class="guide-signal-badge" style="background:var(--accent-bg);color:var(--accent-light);">Signal 2</div>
+          <div>
+            <div class="guide-signal-title">Stylometric Heuristics</div>
+            <div class="guide-signal-desc">
+              Runs entirely in Python with no API call. Measures four statistical
+              properties of the text's structure — sentence-length variance, vocabulary
+              diversity (type-token ratio), punctuation density, and frequency of
+              formulaic transition phrases. AI writing tends to be more statistically
+              uniform than human writing. This signal looks at <em>how</em> something
+              is written, not what it says.
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Why signals can disagree -->
+      <div class="guide-card">
+        <h3 class="guide-heading">Why the two signals sometimes disagree</h3>
+        <p class="guide-body">
+          The LLM signal and the stylometric signal measure completely different things.
+          It is possible for them to point in opposite directions — for example, a formal
+          academic essay might have uniform sentence lengths (high stylometric score) but
+          genuine personal insight that the LLM recognises as human (low LLM score).
+        </p>
+        <p class="guide-body" style="margin-top: 10px;">
+          When the two signals disagree by more than 30 percentage points, the system
+          applies a <strong>disagreement penalty</strong> — the combined score is capped
+          at 70% regardless of the arithmetic result. This prevents the system from
+          being confidently wrong. A large disagreement between signals is itself
+          evidence of uncertainty.
+        </p>
+      </div>
+
+      <!-- When scores are less reliable -->
+      <div class="guide-card">
+        <h3 class="guide-heading">When scores are less reliable</h3>
+        <p class="guide-body" style="margin-bottom: 12px;">
+          The system will show a yellow warning banner when any of these conditions apply:
+        </p>
+        <div class="guide-warning-row">
+          <span class="guide-warning-icon">⚠</span>
+          <div><strong>Short text (under 50 words)</strong> — the stylometric signal needs multiple sentences to compute meaningful statistics. Very short texts may score as uncertain regardless of their true origin.</div>
+        </div>
+        <div class="guide-warning-row">
+          <span class="guide-warning-icon">⚠</span>
+          <div><strong>Non-Latin script</strong> — the stylometric heuristics were tuned on English text and produce unreliable scores for Arabic, Chinese, Japanese, and other scripts. Only the LLM signal is active.</div>
+        </div>
+        <div class="guide-warning-row">
+          <span class="guide-warning-icon">⚠</span>
+          <div><strong>Source code</strong> — braces, indentation, and semicolons make the structural analysis meaningless for programming languages. Only the LLM signal is active.</div>
+        </div>
+        <div class="guide-warning-row">
+          <span class="guide-warning-icon">⚠</span>
+          <div><strong>Long text (over 4,000 characters)</strong> — the LLM only analyzes the first 4,000 characters. The warning tells you what percentage of the text was covered semantically. The stylometric signal always analyzes the full text.</div>
+        </div>
+      </div>
+
+      <!-- Appeals -->
+      <div class="guide-card" style="margin-bottom: 0;">
+        <h3 class="guide-heading">If you believe the score is wrong</h3>
+        <p class="guide-body">
+          No AI detection system is perfect. If your content is labeled as AI-generated
+          but you wrote it yourself, you can submit an appeal directly from the result card.
+          Your explanation is logged alongside the original classification and queued for
+          human review. The status changes to "under review" immediately — the
+          classification is no longer treated as final.
+        </p>
+        <p class="guide-body" style="margin-top: 10px;">
+          Common reasons scores may be misleading: writing in a formal academic style,
+          being a non-native English speaker, writing in a genre with structured conventions
+          (legal, technical, or business writing), or submitting very short creative work.
+          All of these are worth mentioning in your appeal reasoning.
+        </p>
+      </div>
+
+    </div>
+
+  </main>
+
+  <!-- ── Right panel: live activity feed ───────────────────── -->
+  <aside class="panel">
+    <div class="panel-title">Recent activity</div>
+    <button class="refresh-btn" onclick="refreshPanel()" style="margin-bottom: 12px;">
+      Refresh
+    </button>
+    <div id="panel-log">
+      <div style="font-size: 12px; color: var(--text-dim);">Loading...</div>
+    </div>
+  </aside>
+
+</div>
+
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
